@@ -1,0 +1,18 @@
+# Build output
+/dist/
+/server
+
+# Go
+*.test
+*.out
+
+# Local tooling
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Never commit credentials
+.env
+*.key
+*.pem
