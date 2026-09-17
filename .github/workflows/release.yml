@@ -190,6 +190,64 @@ jobs:
       - name: Verify published runtime
         run: scripts/verify-image.sh "${IMAGE_DIGEST_REF}" "${RELEASE_VERSION}" "${TAG_SHA}" "${BUILT_AT}" "${SOURCE_URL}"
 
+      - id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY }}
+          subject-digest: ${{ env.IMAGE_DIGEST }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - id: sbom_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY }}
+          subject-digest: ${{ env.IMAGE_DIGEST }}
+          sbom-path: dist/sbom.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Sign digest with Sigstore keyless signing
+        run: cosign sign --yes "${IMAGE_DIGEST_REF}"
+
+      - name: Verify signature identity
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "${COSIGN_IDENTITY}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-repository "${GITHUB_REPOSITORY}" \
+            --certificate-github-workflow-ref "${GITHUB_REF}" \
+            --certificate-github-workflow-sha "${GITHUB_SHA}" \
+            --certificate-github-workflow-trigger "push" \
+            "${IMAGE_DIGEST_REF}" >/dev/null
+          printf 'Signature verified for %s\n' "${COSIGN_IDENTITY}"
+
+      - name: Verify provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "oci://${IMAGE_DIGEST_REF}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --deny-self-hosted-runners
+
+      - name: Verify SBOM attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "oci://${IMAGE_DIGEST_REF}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --predicate-type "https://spdx.dev/Document/v2.3" \
+            --deny-self-hosted-runners
+
       - name: Failure diagnostics
         if: failure()
         run: |
