@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: false
+
+      - name: make check
+        run: make check
+
+  container:
+    name: container
+    runs-on: ubuntu-24.04
+    needs: quality
+    timeout-minutes: 10
+    env:
+      BUILDX_NO_DEFAULT_ATTESTATIONS: '1'
+      LOCAL_IMAGE: secure-container-release:local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: v0.37.0
+          driver: docker-container
+          driver-opts: |
+            image=moby/buildkit:v0.33.0-ubuntu@sha256:f9f89565e1a4e0a5f395b2bff4e7ebf07b753a82c7c7e1ea75472c8556937e83
+
+      - name: Tool versions
+        run: |
+          docker version
+          docker buildx version
+          gh --version
+
+      - name: Install Trivy and Syft
+        run: scripts/install-ci-tools.sh
+
+      - name: Resolve image metadata
+        run: |
+          set -euo pipefail
+          built_at="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          {
+            printf 'IMAGE_COMMIT=%s\n' "${GITHUB_SHA}"
+            printf 'IMAGE_BUILT_AT=%s\n' "${built_at}"
+            printf 'IMAGE_SOURCE_URL=%s\n' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --load \
+            --build-arg VERSION=ci \
+            --build-arg "COMMIT=${IMAGE_COMMIT}" \
+            --build-arg "BUILT_AT=${IMAGE_BUILT_AT}" \
+            --build-arg "SOURCE_URL=${IMAGE_SOURCE_URL}" \
+            --tag "${LOCAL_IMAGE}" \
+            .
+
+      - name: Verify image
+        run: scripts/verify-image.sh "${LOCAL_IMAGE}" ci "${IMAGE_COMMIT}" "${IMAGE_BUILT_AT}" "${IMAGE_SOURCE_URL}"
+
+      - name: Vulnerability scan
+        run: scripts/scan-image.sh "${LOCAL_IMAGE}"
+
+      - name: SBOM
+        run: scripts/generate-sbom.sh "${LOCAL_IMAGE}"
+
+      - name: Verify SBOM
+        run: scripts/verify-sbom.sh
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set +e
+          docker version
+          docker buildx version
+          docker images
+          docker image inspect "${LOCAL_IMAGE}"
+          for container in $(docker ps -a --filter name=secure-container-release-smoke- --format '{{.Names}}'); do
+            docker logs "${container}"
+          done
+          trivy --version
+          syft version
+          go version
