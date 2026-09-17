@@ -248,6 +248,103 @@ jobs:
             --predicate-type "https://spdx.dev/Document/v2.3" \
             --deny-self-hosted-runners
 
+      - name: Release manifest and checksums
+        env:
+          PROVENANCE_URL: ${{ steps.provenance.outputs.attestation-url }}
+          SBOM_ATTESTATION_URL: ${{ steps.sbom_attestation.outputs.attestation-url }}
+        run: |
+          set -euo pipefail
+          sbom_sha="$(sha256sum dist/sbom.spdx.json | awk '{ print $1 }')"
+          jq -n \
+            --arg version "${RELEASE_VERSION}" \
+            --arg gitTag "${GITHUB_REF_NAME}" \
+            --arg commit "${TAG_SHA}" \
+            --arg builtAt "${BUILT_AT}" \
+            --arg image "${IMAGE_REPOSITORY}" \
+            --arg digest "${IMAGE_DIGEST}" \
+            --arg imageReference "${IMAGE_DIGEST_REF}" \
+            --arg localImageId "${LOCAL_IMAGE_ID}" \
+            --arg source "${SOURCE_URL}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg workflowRun "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg cosignIdentity "${COSIGN_IDENTITY}" \
+            --arg provenanceAttestationUrl "${PROVENANCE_URL}" \
+            --arg sbomAttestationUrl "${SBOM_ATTESTATION_URL}" \
+            --arg sbomSha256 "${sbom_sha}" \
+            '{
+              version: $version,
+              gitTag: $gitTag,
+              commit: $commit,
+              builtAt: $builtAt,
+              image: $image,
+              digest: $digest,
+              imageReference: $imageReference,
+              localImageId: $localImageId,
+              source: $source,
+              workflowRef: $workflowRef,
+              workflowRun: $workflowRun,
+              cosignIdentity: $cosignIdentity,
+              provenanceAttestationUrl: $provenanceAttestationUrl,
+              sbomAttestationUrl: $sbomAttestationUrl,
+              sbom: "sbom.spdx.json",
+              sbomSha256: $sbomSha256
+            }' > dist/release-manifest.json
+          jq -e 'all(.[]; type == "string" and length > 0)' dist/release-manifest.json >/dev/null
+          (cd dist && sha256sum release-manifest.json sbom.spdx.json | LC_ALL=C sort -k2 > SHA256SUMS)
+          (cd dist && sha256sum -c --strict SHA256SUMS)
+          cat dist/release-manifest.json
+
+      - name: Verify release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/verify-release.sh \
+            "${IMAGE_DIGEST_REF}" \
+            "${RELEASE_VERSION}" \
+            "${TAG_SHA}" \
+            "${BUILT_AT}" \
+            "${SOURCE_URL}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_REF}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft > release-state.txt 2>/dev/null; then
+            if [ "$(cat release-state.txt)" = "false" ]; then
+              printf 'FAIL: a published release %s already exists; it is never overwritten\n' "${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            printf 'Deleting draft left by a previous failed run (the tag is kept)\n'
+            gh release delete "${GITHUB_REF_NAME}" --yes
+          fi
+          rm -f release-state.txt
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --draft \
+            --title "Secure Container Release ${GITHUB_REF_NAME}" \
+            --notes-file - \
+            dist/sbom.spdx.json \
+            dist/release-manifest.json \
+            dist/SHA256SUMS <<'NOTES'
+          First public release of Secure Container Release, a compact GitHub Actions reference repository that builds and verifies an OCI image, blocks CRITICAL vulnerabilities, generates an SPDX 2.3 SBOM, publishes an immutable digest to GHCR, creates provenance and SBOM attestations, signs the digest with Sigstore keyless signing and verifies the resulting release before publication.
+
+          The immutable image digest, attestation links and signing identity are recorded in `release-manifest.json`.
+
+          GitHub Container Registry creates the first package as private by default. After this verified release, the package owner changes the package visibility to Public once so the published digest can be pulled anonymously.
+          NOTES
+
+          assets="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '[.assets[].name] | sort | join(",")')"
+          if [ "${assets}" != "SHA256SUMS,release-manifest.json,sbom.spdx.json" ]; then
+            printf 'FAIL: draft release assets are %s; not publishing\n' "${assets}"
+            exit 1
+          fi
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
+          printf 'Published release %s\n' "${GITHUB_REF_NAME}"
+
       - name: Failure diagnostics
         if: failure()
         run: |
