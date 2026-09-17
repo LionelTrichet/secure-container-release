@@ -1,0 +1,16 @@
+.git
+.github
+dist
+scripts
+build
+README.md
+ARCHITECTURE.md
+SECURITY.md
+CONTRIBUTING.md
+CHANGELOG.md
+NOTICE
+LICENSE
+Makefile
+.dockerignore
+.gitignore
+server
