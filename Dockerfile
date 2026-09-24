@@ -1,7 +1,7 @@
 # Both base images are pinned by digest. No syntax directive: it would pull an
 # unpinned Dockerfile frontend image.
 
-FROM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS builder
+FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS builder
 
 ARG VERSION
 ARG COMMIT
